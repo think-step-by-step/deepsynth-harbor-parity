@@ -50,10 +50,49 @@ def _extract_json(text: str) -> str:
     return stripped[brace_start:]
 
 
+def _extract_text_from_stream(stream: str) -> str:
+    """Extract assistant text blocks from stream-json output.
+
+    Reconstructs the equivalent of ``--output-format text`` by pulling every
+    ``text`` content block out of ``assistant`` messages in the stream.
+    """
+    texts: list[str] = []
+    for line in stream.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "assistant":
+            for block in event.get("message", {}).get("content", []):
+                if block.get("type") == "text":
+                    text = block.get("text", "").strip()
+                    if text:
+                        texts.append(text)
+        elif event.get("type") == "result":
+            # Final result event may carry the answer text directly
+            result_text = event.get("result", "")
+            if isinstance(result_text, str) and result_text.strip():
+                texts.append(result_text.strip())
+    return "\n\n".join(texts)
+
+
 async def _run_claude(
-    prompt: str, model: str, claude_bin: str, timeout_sec: float | None = None,
+    prompt: str,
+    model: str,
+    claude_bin: str,
+    timeout_sec: float | None = None,
+    trajectory_path: Path | None = None,
 ) -> tuple[str, dict]:
-    """Run claude CLI and return (raw_output, trace_dict)."""
+    """Run claude CLI and return (raw_output, trace_dict).
+
+    Uses ``--output-format stream-json`` so the full trajectory (tool calls,
+    thinking, results) is captured. The trajectory is saved verbatim to
+    *trajectory_path*; the model's text responses are extracted and returned
+    as *raw_output* for downstream JSON parsing.
+    """
     cmd = [
         claude_bin,
         "-p",
@@ -61,7 +100,8 @@ async def _run_claude(
         "--model",
         model,
         "--output-format",
-        "text",
+        "stream-json",
+        "--verbose",
         "--dangerously-skip-permissions",
     ]
     env = os.environ.copy()
@@ -82,7 +122,20 @@ async def _run_claude(
         )
     except asyncio.TimeoutError:
         proc.kill()
-        await proc.wait()
+        # Collect any partial output that was buffered before the kill
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=5,
+            )
+        except Exception:
+            stdout_bytes, stderr_bytes = b"", b""
+            await proc.wait()
+        # Best-effort: save partial trajectory even on timeout
+        if trajectory_path and stdout_bytes:
+            trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+            trajectory_path.write_text(
+                stdout_bytes.decode(errors="replace"), encoding="utf-8",
+            )
         raise TimeoutError(
             f"claude CLI timed out after {timeout_sec:.0f}s"
         )
@@ -90,7 +143,14 @@ async def _run_claude(
     stdout = stdout_bytes.decode()
     stderr = stderr_bytes.decode()
 
-    raw_output = stdout.strip()
+    # Save full trajectory (stream-json lines, same format as Harbor's
+    # claude-code.txt / trajectory.json)
+    if trajectory_path:
+        trajectory_path.parent.mkdir(parents=True, exist_ok=True)
+        trajectory_path.write_text(stdout, encoding="utf-8")
+
+    # Extract text from the stream (equivalent to --output-format text)
+    raw_output = _extract_text_from_stream(stdout)
 
     if proc.returncode != 0:
         if raw_output:
@@ -108,6 +168,7 @@ async def _run_claude(
         "stderr_chars": len(stderr),
         "raw_output": raw_output,
         "extracted_json": json_str,
+        "trajectory_file": str(trajectory_path) if trajectory_path else None,
     }
 
     return json_str, trace
@@ -124,6 +185,7 @@ async def _process_question(
     semaphore: asyncio.Semaphore,
     log_lock: asyncio.Lock,
     timeout_sec: float | None = None,
+    trajectory_dir: Path | None = None,
 ) -> tuple[str, object]:
     """Process a single question, respecting the concurrency semaphore."""
     qnum = str(item.get("Question Number", idx + 1)).strip()
@@ -133,10 +195,16 @@ async def _process_question(
         print(f"[started]  {idx + 1}/{total} Q{qnum}")
         prompt = template.format(question=question)
 
+        trajectory_path = (
+            trajectory_dir / f"Q{qnum}.jsonl" if trajectory_dir else None
+        )
+
         start = time.perf_counter()
         try:
             json_str, trace = await _run_claude(
-                prompt, model, claude_bin, timeout_sec=timeout_sec,
+                prompt, model, claude_bin,
+                timeout_sec=timeout_sec,
+                trajectory_path=trajectory_path,
             )
         except TimeoutError:
             elapsed = time.perf_counter() - start
@@ -192,6 +260,9 @@ async def _async_main(args: argparse.Namespace) -> None:
     log_lock = asyncio.Lock()
     total = len(data)
 
+    trajectory_dir = args.output_dir / "trajectories"
+    trajectory_dir.mkdir(parents=True, exist_ok=True)
+
     timeout = args.timeout if args.timeout > 0 else None
     timeout_str = f"{timeout:.0f}s" if timeout else "none"
     print(f"Running {total} questions with concurrency={args.concurrency}, timeout={timeout_str}")
@@ -200,6 +271,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         _process_question(
             idx, total, item, template, args.model, args.claude_bin,
             log_path, semaphore, log_lock, timeout_sec=timeout,
+            trajectory_dir=trajectory_dir,
         )
         for idx, item in enumerate(data)
     ]
