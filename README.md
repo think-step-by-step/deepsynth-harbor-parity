@@ -15,12 +15,12 @@ python run_original_claude_code.py --dataset-json dev.json --prompt-template ori
 
 ### DeepSynth Benchmark (n=40)
 
-| Trial | Mean F1 | Parse Errors | Missing | Scored > 0 |
-|-------|---------|--------------|---------|------------|
-| 4     | 0.075   | 29 (72.5%)   | 2       | 3 (Q11=1.0, Q29=1.0, Q37=1.0) |
-| 5     | 0.095   | 23 (57.5%)   | 1       | 4 (Q24=1.0, Q29=0.8, Q30=1.0, Q49=1.0) |
-| 6     | 0.108   | 22 (55.0%)   | 1       | 5 (Q29=1.0, Q36=0.33, Q53=1.0, Q68=1.0, Q74=1.0) |
-| **Avg** | **0.093 ± 0.010** | **24.7 (61.7%)** | **1.3** | |
+| Trial | Mean F1 | Scored > 0 |
+|-------|---------|------------|
+| 4     | 0.075   | 3 (Q11=1.0, Q29=1.0, Q37=1.0) |
+| 5     | 0.095   | 4 (Q24=1.0, Q29=0.8, Q30=1.0, Q49=1.0) |
+| 6     | 0.108   | 5 (Q29=1.0, Q36=0.33, Q53=1.0, Q68=1.0, Q74=1.0) |
+| **Avg** | **0.093 ± 0.010** | |
 
 All trials use **claude-haiku-4-5** via Claude Code CLI (`claude-code@2.1.73`) with LLM judge enabled (0 judge upgrades across all runs).
 
